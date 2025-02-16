@@ -1,0 +1,118 @@
+import time
+import requests
+import websocket
+import json
+import pandas as pd
+
+# Deriv API Token
+API_TOKEN = "your_deriv_api_token"
+
+# Trading settings
+stake = 0.35
+martingale_levels = [5, 7]  # Martingale recovery steps
+rsi_period = 14
+rsi_overbought = 70
+rsi_oversold = 30
+stop_loss = 10  # Stop loss limit
+take_profit = 20  # Take profit limit
+
+# WebSocket connection
+DERIV_API_URL = "wss://ws.binaryws.com/websockets/v3?app_id=1089"
+socket = websocket.WebSocket()
+socket.connect(DERIV_API_URL)
+
+def send_request(request):
+    socket.send(json.dumps(request))
+    return json.loads(socket.recv())
+
+def get_price_history(symbol="R_100", count=100):
+    request = {
+        "ticks_history": symbol,
+        "count": count,
+        "end": "latest",
+        "style": "candles",
+        "granularity": 60
+    }
+    response = send_request(request)
+    return response["candles"] if "candles" in response else []
+
+def calculate_rsi(prices, period=14):
+    df = pd.DataFrame(prices)
+    df['change'] = df['close'].diff()
+    df['gain'] = df['change'].apply(lambda x: x if x > 0 else 0)
+    df['loss'] = df['change'].apply(lambda x: -x if x < 0 else 0)
+    df['avg_gain'] = df['gain'].rolling(window=period).mean()
+    df['avg_loss'] = df['loss'].rolling(window=period).mean()
+    df['rs'] = df['avg_gain'] / df['avg_loss']
+    df['rsi'] = 100 - (100 / (1 + df['rs']))
+    return df['rsi'].iloc[-1]
+
+def place_trade(stake, contract_type="CALL"):
+    request = {
+        "buy": 1,
+        "price": stake,
+        "parameters": {
+            "amount": stake,
+            "basis": "stake",
+            "contract_type": contract_type,
+            "currency": "USD",
+            "duration": 1,
+            "duration_unit": "m",
+            "symbol": "R_100"
+        }
+    }
+    response = send_request(request)
+    return response
+
+def main():
+    balance = 0
+    loss_count = 0
+    current_stake = stake
+    
+    while True:
+        prices = get_price_history()
+        if not prices:
+            print("Error retrieving prices")
+            continue
+        
+        rsi = calculate_rsi(prices, rsi_period)
+        print(f"Current RSI: {rsi}")
+        
+        if rsi < rsi_oversold:
+            trade_response = place_trade(current_stake, "CALL")
+            print(f"Placed CALL trade with stake {current_stake}")
+        elif rsi > rsi_overbought:
+            trade_response = place_trade(current_stake, "PUT")
+            print(f"Placed PUT trade with stake {current_stake}")
+        else:
+            print("No trade placed.")
+            time.sleep(10)
+            continue
+        
+        # Check trade result (mocked for this example)
+        trade_won = True  # Assume trade result from API here
+        
+        if trade_won:
+            loss_count = 0
+            current_stake = stake
+        else:
+            loss_count += 1
+            if loss_count <= len(martingale_levels):
+                current_stake = martingale_levels[loss_count - 1]
+            else:
+                current_stake = stake
+                loss_count = 0  # Reset Martingale after full cycle
+        
+        # Risk management
+        balance += current_stake if trade_won else -current_stake
+        if balance <= -stop_loss:
+            print("Stop loss reached. Exiting...")
+            break
+        if balance >= take_profit:
+            print("Take profit reached. Exiting...")
+            break
+        
+        time.sleep(10)
+
+if __name__ == "__main__":
+    main()
